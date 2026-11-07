@@ -113,6 +113,7 @@ export function getAnthropicStatusCheckContract(
 ): {
   statusCheckOutcome: RuntimeStatusCheckOutcome
   statusCheckErrorCode: RuntimeStatusCheckErrorCode | null
+  statusCheckSource: { schemaVersion: 1; cause: 'none' | 'catalog' | 'connection' }
 } {
   if (
     backend?.authMethodDetail?.includes('transport_unavailable') ||
@@ -120,20 +121,27 @@ export function getAnthropicStatusCheckContract(
   ) {
     return {
       statusCheckOutcome: 'transient_error',
+      statusCheckSource: { schemaVersion: 1, cause: 'connection' },
       statusCheckErrorCode: 'unavailable',
     }
   }
   if (catalogStatus === 'unavailable') {
     return {
       statusCheckOutcome: 'transient_error',
+      statusCheckSource: { schemaVersion: 1, cause: 'catalog' },
       statusCheckErrorCode: 'unavailable',
     }
   }
   if (catalogStatus === 'stale' || catalogStatus === 'degraded') {
     return {
       statusCheckOutcome: 'pending',
+      statusCheckSource: { schemaVersion: 1, cause: 'catalog' },
       statusCheckErrorCode: 'partial_response',
     }
   }
-  return { statusCheckOutcome: 'authoritative', statusCheckErrorCode: null }
+  return {
+    statusCheckOutcome: 'authoritative',
+    statusCheckErrorCode: null,
+    statusCheckSource: { schemaVersion: 1, cause: 'none' },
+  }
 }

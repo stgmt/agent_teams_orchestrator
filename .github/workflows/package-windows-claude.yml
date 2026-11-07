@@ -1,0 +1,89 @@
+name: Package Windows x64 Claude runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Exact 40-character commit SHA of the selected workflow ref
+        required: true
+        type: string
+      runtime_version:
+        description: Version matching package.json
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-2022
+    env:
+      RUNTIME_OPENCODE_V2: 'off'
+      RUNTIME_SOURCE_COMMIT: ${{ inputs.source_commit }}
+      RUNTIME_VERSION: ${{ inputs.runtime_version }}
+    steps:
+      - name: Check out selected workflow revision
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require the exact selected source commit
+        shell: pwsh
+        env:
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNTIME_SOURCE_COMMIT -cnotmatch '^[a-f0-9]{40}$' -or $env:RUNTIME_SOURCE_COMMIT -cne $env:WORKFLOW_SHA) { throw 'Expected exact selected workflow commit' }
+          $actual = (git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actual -cne $env:RUNTIME_SOURCE_COMMIT) { throw 'Source commit mismatch' }
+          $dirty = git status --porcelain --untracked-files=all
+          if ($LASTEXITCODE -ne 0 -or $dirty) { throw 'Source checkout is not clean' }
+      - name: Install pinned Bun compiler
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.3
+      - name: Require native Windows x64 compiler
+        shell: pwsh
+        run: |
+          bun --no-install -e 'if (process.platform !== "win32" || process.arch !== "x64" || Bun.version !== "1.4.3") throw new Error("Expected native Windows x64 Bun 1.4.3")'
+          if ($LASTEXITCODE -ne 0) { throw 'Compiler identity mismatch' }
+      - name: Install locked dependencies
+        run: bun install --frozen-lockfile --linker hoisted
+      - name: Require unchanged source after dependency installation
+        shell: pwsh
+        run: |
+          $dirty = git status --porcelain --untracked-files=all
+          if ($LASTEXITCODE -ne 0 -or $dirty) { throw 'Dependency installation changed source checkout' }
+      - name: Compile Claude-only runtime
+        shell: pwsh
+        run: |
+          if (Test-Path dist) { Remove-Item -LiteralPath dist -Recurse -Force }
+          bun --no-install ./scripts/package-runtime.ts --platform win32-x64
+          if ($LASTEXITCODE -ne 0) { throw 'Runtime build failed' }
+      - name: Verify the compiled runtime without OpenCode V2
+        shell: pwsh
+        env:
+          CANDIDATE_BINARY: dist/cli.exe
+        run: |
+          bun --no-install ./scripts/ci/verify-runtime-without-v2.ts
+          if ($LASTEXITCODE -ne 0) { throw 'Compiled runtime verification failed' }
+      - name: Require unchanged tracked source after compilation
+        shell: pwsh
+        run: |
+          git diff --quiet
+          if ($LASTEXITCODE -ne 0) { throw 'Compilation changed tracked source' }
+          git diff --cached --quiet
+          if ($LASTEXITCODE -ne 0) { throw 'Compilation changed staged source' }
+      - name: Create bound Windows archive and manifest
+        shell: pwsh
+        run: |
+          bun --no-install ./scripts/package-windows-release.ts
+          if ($LASTEXITCODE -ne 0) { throw 'Runtime packaging failed' }
+      - name: Save exact release files for owner review
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-claude-runtime-${{ inputs.runtime_version }}-${{ inputs.source_commit }}
+          path: release-flat/*
+          if-no-files-found: error
+          retention-days: 14
