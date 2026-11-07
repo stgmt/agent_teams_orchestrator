@@ -1,5 +1,16 @@
 # Release Flow
 
+> **Fork releases:** `stgmt/agent_teams_orchestrator` ships Windows x64 only.
+> Push an immutable source tag, then run `package-windows-claude.yml` against
+> that tag and exact commit. Verify the downloaded workflow artifact, publish
+> its unchanged ZIP, manifest, and checksum in this fork under
+> `runtime-v<version>`, and verify the public downloads. OpenCode V2 is not
+> included. The upstream publisher below is disabled in this fork; a tag push
+> does not dispatch it.
+>
+> The remaining sections describe the upstream release process and its
+> separate multi-platform binaries repository.
+
 This repo has two different release concepts. They should not be mixed.
 
 ## 1. `agent_teams_orchestrator` release
