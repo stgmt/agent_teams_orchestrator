@@ -67,13 +67,14 @@ await mkdir('./dist', { recursive: true })
 const metadata = JSON.parse(await readFile('./package.json', 'utf8')) as { version: string }
 await writeFile('./dist/VERSION', metadata.version + '\n')
 await writeFile('./dist/COMMIT_SHA', sourceCommit + '\n')
-await rm('./dist/opencode-v2-delivery.json', { force: true })
-await rm('./dist/opencode-v2-support', { recursive: true, force: true })
-await rm('./dist/WINDOWS_CLAUDE_DELIVERY', { force: true })
+// Bun on Windows can resolve relative rm paths outside cwd; use absolute paths.
+await rm(path.resolve('./dist/opencode-v2-delivery.json'), { force: true })
+await rm(path.resolve('./dist/opencode-v2-support'), { recursive: true, force: true })
+await rm(path.resolve('./dist/WINDOWS_CLAUDE_DELIVERY'), { force: true })
 if (openCodeV2ReleaseDelivery() === 'off') {
   // Never ship residual V2 files from a previous bundled build.
   for (const leftover of ['./dist/opencode-delivery.json', './dist/local-cli', './dist/bun', './dist/build-bun']) {
-    await rm(leftover, { recursive: true, force: true })
+    await rm(path.resolve(leftover), { recursive: true, force: true })
     if (existsSync(leftover)) throw new Error(`OpenCode V2 delivery survived cleanup: ${leftover}`)
   }
   build(process.execPath, ['--compile', '--without-opencode-v2'])
