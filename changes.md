@@ -22,3 +22,7 @@ This pull request introduces full feature parity and explicit UI support for the
 
 ### 4. Git Housekeeping
 - Configured `.gitignore` to securely and durably exclude the `openclaw/` gateway directory from staging commits.
+
+## Runtime status and registry access
+- Anthropic status reports whether degradation comes from the catalog or connection.
+- Codex native launch overrides allow scoped spec registry access only when the configured URL matches the environment and the bearer token is supplied through its designated environment variable.

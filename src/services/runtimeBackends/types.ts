@@ -219,6 +219,11 @@ export type RuntimeProviderStatus = {
   /** Additive wire contract; consumers must treat missing legacy values conservatively. */
   statusCheckOutcome?: RuntimeStatusCheckOutcome
   statusCheckErrorCode?: RuntimeStatusCheckErrorCode | null
+  /** Explicit source of Anthropic status-check degradation, not launch authorization. */
+  statusCheckSource?: {
+    schemaVersion: 1
+    cause: 'none' | 'catalog' | 'connection'
+  }
 }
 
 export type RuntimeStatusPayload = {
