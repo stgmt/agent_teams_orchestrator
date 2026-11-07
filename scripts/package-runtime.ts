@@ -69,6 +69,7 @@ await writeFile('./dist/VERSION', metadata.version + '\n')
 await writeFile('./dist/COMMIT_SHA', sourceCommit + '\n')
 await rm('./dist/opencode-v2-delivery.json', { force: true })
 await rm('./dist/opencode-v2-support', { recursive: true, force: true })
+await rm('./dist/WINDOWS_CLAUDE_DELIVERY', { force: true })
 if (openCodeV2ReleaseDelivery() === 'off') {
   // Never ship residual V2 files from a previous bundled build.
   for (const leftover of ['./dist/opencode-delivery.json', './dist/local-cli', './dist/bun', './dist/build-bun']) {
@@ -77,6 +78,7 @@ if (openCodeV2ReleaseDelivery() === 'off') {
   }
   build(process.execPath, ['--compile', '--without-opencode-v2'])
   if (!existsSync('./dist/cursor-managed')) throw new Error('Managed Cursor assets missing')
+  if (platform === 'win32-x64') await writeFile('./dist/WINDOWS_CLAUDE_DELIVERY', 'off\n')
   console.log(`Prepared compiled runtime without OpenCode V2 for ${platform}`)
 } else {
   const binary = await pinnedBinary(pins.assets[platform]!, args.includes('--bun-archive') ? option('--bun-archive') : undefined)

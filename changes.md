@@ -26,3 +26,8 @@ This pull request introduces full feature parity and explicit UI support for the
 ## Runtime status and registry access
 - Anthropic status reports whether degradation comes from the catalog or connection.
 - Codex native launch overrides allow scoped spec registry access only when the configured URL matches the environment and the bearer token is supplied through its designated environment variable.
+
+## Windows x64 Claude runtime packaging
+- The manual Windows-only workflow builds with OpenCode V2 disabled and uploads a ZIP, a one-platform manifest and SHA-256 checksums as a workflow artifact for owner review. It does not publish a release.
+- The manifest binds the version and source commit recorded by the build to the archive hash. ZIP file order and timestamps are normalized; byte-identical builds still depend on the compiler and build inputs.
+- The upstream multi-platform release workflow and manifest remain separate. Consumers must explicitly support the `windows-x64-claude-only` manifest before using this artifact.
