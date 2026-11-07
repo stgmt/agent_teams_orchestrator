@@ -2,9 +2,6 @@ name: Release Runtime
 run-name: runtime ${{ inputs.runtime_version || github.ref_name }} -> ${{ inputs.target_release_repo || '777genius/agent_teams_orchestrator_binaries' }}@${{ inputs.target_release_tag || format('runtime-{0}', github.ref_name) }}
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       source_ref:
@@ -65,6 +62,13 @@ jobs:
       draft_release_id: ${{ steps.release-state.outputs.draft_release_id }}
 
     steps:
+      - name: Refuse the upstream publisher in the fork
+        shell: bash
+        run: |
+          if [ "$GITHUB_REPOSITORY" != "777genius/agent_teams_orchestrator" ]; then
+            echo "This fork uses package-windows-claude.yml; the upstream publisher is disabled here." >&2
+            exit 1
+          fi
       - name: Checkout source ref
         uses: actions/checkout@v6
         with:
