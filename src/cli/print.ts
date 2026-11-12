@@ -10,6 +10,10 @@ import { waitForRemoteManagedSettingsToLoad } from 'src/services/remoteManagedSe
 import { StructuredIO } from 'src/cli/structuredIO.js'
 import { RemoteIO } from 'src/cli/remoteIO.js'
 import {
+  createNativeAppManagedSdkRuntime,
+  NATIVE_APP_MANAGED_MAILBOX_PROTOCOL,
+} from '../services/teamBootstrap/nativeAppManagedSdkRuntime.js'
+import {
   type Command,
   formatDescriptionWithSource,
   getCommandName,
@@ -349,6 +353,9 @@ import { loadAllPluginsCacheOnly } from '../utils/plugins/pluginLoader.js'
 import {
   isTeamLead,
   getAgentName,
+  getAgentId,
+  getTeamName,
+  isTeammate,
   hasActiveInProcessTeammates,
   hasWorkingInProcessTeammates,
   waitForTeammatesToBecomeIdle,
@@ -485,6 +492,8 @@ export function canBatchWith(
     next !== undefined &&
     head.protocolKind !== GROUP_MAILBOX_PROTOCOL_KIND &&
     next.protocolKind !== GROUP_MAILBOX_PROTOCOL_KIND &&
+    head.protocolKind !== NATIVE_APP_MANAGED_MAILBOX_PROTOCOL &&
+    next.protocolKind !== NATIVE_APP_MANAGED_MAILBOX_PROTOCOL &&
     next.mode === 'prompt' &&
     next.workload === head.workload &&
     next.isMeta === head.isMeta
@@ -1318,6 +1327,25 @@ function runHeadlessStreaming(
   // include Assistant, User, Attachment, and Progress messages.
   // TODO: Clean up this code to avoid passing around a mutable array.
   const mutableMessages: Message[] = initialMessages
+  const nativeAgentName = getAgentName()
+  const nativeTeamName = getTeamName(getAppState().teamContext)
+  const nativeSdkRuntime = structuredIO instanceof RemoteIO && isTeammate() &&
+    nativeAgentName && nativeTeamName
+    ? createNativeAppManagedSdkRuntime({
+        agentName: nativeAgentName,
+        agentId: getAgentId(),
+        teamName: nativeTeamName,
+        sessionId: getSessionId(),
+        getMessages: () => mutableMessages,
+        setAppState,
+        isQueryLoopIdle: () => !running,
+        groupChatReady: () => Boolean(getHeadlessGroupContext()?.ready),
+        submit: (value, uuid) => {
+          enqueue({ mode: 'prompt', value, uuid, isMeta: true, protocolKind: NATIVE_APP_MANAGED_MAILBOX_PROTOCOL })
+          void run()
+        },
+      })
+    : null
 
   // Seed the readFileState cache from the transcript (content the model saw,
   // with message timestamps) so getChangedFiles can detect external edits.
@@ -2116,7 +2144,8 @@ function runHeadlessStreaming(
     // notifications are drained by the subagent's mid-turn gate in query.ts.
     // Defined outside the try block so it's accessible in the post-finally
     // queue re-checks at the bottom of run().
-    const isMainThread = (cmd: QueuedCommand) => cmd.agentId === undefined
+    const isMainThread = (cmd: QueuedCommand) => cmd.agentId === undefined &&
+      (nativeSdkRuntime?.canAdmitCommand(cmd.uuid) ?? true)
 
     try {
       let command: QueuedCommand | undefined
@@ -2367,6 +2396,7 @@ function runHeadlessStreaming(
           // const-capture: TS loses `while ((command = dequeue()))` narrowing
           // inside the closure.
           const cmd = command
+          const nativeBootstrapTurn = await nativeSdkRuntime?.beforeTurn(cmd.uuid)
           if (queuedGroupTurn) {
             setActiveHeadlessGroupMailboxTurn({
               teamName: queuedGroupTurn.teamName,
@@ -2384,7 +2414,7 @@ function runHeadlessStreaming(
                 prompt: input,
                 // Only the validated, process-owned envelope can select group
                 // scope. First real lead tasks and ordinary stdin stay direct.
-                conversationScope: queuedGroupTurn ? 'group' : 'direct',
+                conversationScope: nativeBootstrapTurn ? 'bootstrap' : queuedGroupTurn ? 'group' : 'direct',
                 promptUuid: cmd.uuid,
                 isMeta: cmd.isMeta,
                 cwd: cwd(),
@@ -2490,11 +2520,13 @@ function runHeadlessStreaming(
               }
             }) // end runWithWorkload
           } finally {
+            await nativeSdkRuntime?.releaseTurn()
             if (queuedGroupTurn) {
               setActiveHeadlessGroupMailboxTurn(undefined)
               bridgeLastForwardedIndex = mutableMessages.length
             }
           }
+          await nativeSdkRuntime?.completeTurn(cmd.uuid)
 
           const groupTurn = cmd.uuid ? groupMailboxTurns.get(cmd.uuid) : undefined
           if (groupTurn && cmd.uuid) {
@@ -2991,7 +3023,7 @@ function runHeadlessStreaming(
       if (publishedGroupCapability && publishedGroupCapability.path !== currentCapabilityPath) {
         publishedGroupCapability = undefined
       }
-      if (context) {
+      if (context && !nativeSdkRuntime) {
         const path = buildWorkSyncAdmissionCapabilityPath(context)
         const capability = {
           schemaVersion: 1,
@@ -3058,6 +3090,30 @@ function runHeadlessStreaming(
     // The app fences the saved proof by its actual current run and live PID.
   })
   scheduleGroupMailboxPoll()
+
+  if (nativeSdkRuntime) {
+    let stopped = false
+    let nativePollTask: Promise<void> | undefined
+    const scheduleNativeMailbox = () => {
+      if (stopped || nativePollTask || inputClosed) return
+      nativePollTask = nativeSdkRuntime.poll().catch(error => {
+        logError(error)
+        void gracefulShutdown(1)
+      }).finally(() => { nativePollTask = undefined })
+    }
+    const nativeMailboxTimer = setInterval(scheduleNativeMailbox, 500)
+    nativeMailboxTimer.unref()
+    registerCleanup(async () => {
+      stopped = true
+      clearInterval(nativeMailboxTimer)
+      await nativePollTask
+      await nativeSdkRuntime.close()
+    })
+    void nativeSdkRuntime.publishReady().then(scheduleNativeMailbox).catch(error => {
+      logError(error)
+      void gracefulShutdown(1)
+    })
+  }
 
   // Set up UDS inbox callback so the query loop is kicked off
   // when a message arrives via the UDS socket in headless mode.

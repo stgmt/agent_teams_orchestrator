@@ -41,7 +41,7 @@ import {
   unbindWorkSyncContinuationAdmission,
   armWorkSyncPostTurnAdmissionWindow,
 } from '../utils/workSyncContinuationAdmission.js';
-import { writeWorkSyncAdmissionCapability } from '../utils/workSyncAdmissionCapability.js';
+import { publishNativeInboxRuntimeCapability } from '../utils/workSyncAdmissionCapability.js';
 import {
   bindWorkSyncTurnSettledOwnerGate,
   publishStagedWorkSyncTurnSettledIfOwnerReleased,
@@ -962,34 +962,12 @@ export function REPL({
     const teamName = groupCapabilityTeamName;
     const memberName = groupCapabilityMemberName;
     if (!teamName || !memberName) return;
-    const providerId = shouldUseCodexProviderRoutingForCurrentProcess()
-      ? 'codex'
-      : 'anthropic';
-    const runIdentity = getCurrentGroupRunIdentity();
-    void writeWorkSyncAdmissionCapability({
-      schemaVersion: 1,
-      recoveryProtocolVersion: 2,
+    void publishNativeInboxRuntimeCapability({
+      guard: queryGuard,
       teamName,
-      teamIncarnation: process.env.CLAUDE_TEAM_INCARNATION?.trim() || 'unspecified',
       memberName,
-      providerId,
-      runtimeMode: providerId === 'codex' ? 'app-server' : 'repl',
-      runtimeInstanceId: queryGuard.runtimeInstanceId,
-      generation: queryGuard.generation,
-      processorReady: true,
-      pid: runIdentity.pid,
-      bootstrapRunId: runIdentity.bootstrapRunId,
-      runtimeRunId: runIdentity.runtimeRunId,
-      ...(nativeInboxAttachmentsReady
-        ? { nativeInboxAttachmentsVersion: 2 as const }
-        : {}),
-      ...(groupChatToolsReady ? {
-        groupChatProtocolVersion: 1 as const,
-        groupReactionProtocolVersion: 1 as const,
-        groupRunKey: runIdentity.groupRunKey,
-        runKey: runIdentity.runKey,
-      } : {}),
-      publishedAt: new Date().toISOString(),
+      nativeAttachmentsReady: nativeInboxAttachmentsReady !== null,
+      groupChatReady: groupChatToolsReady,
     }).catch(error => {
       logForDebugging(`[WorkSyncAdmission] capability write failed: ${String(error)}`);
     });

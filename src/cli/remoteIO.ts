@@ -18,6 +18,7 @@ import {
   setSessionStateChangedListener,
 } from '../utils/sessionState.js'
 import {
+  recordSdkOutputFrame,
   setInternalEventReader,
   setInternalEventWriter,
 } from '../utils/sessionStorage.js'
@@ -90,6 +91,7 @@ export class RemoteIO extends StructuredIO {
       headers,
       getSessionId(),
       refreshHeaders,
+      { recordFrame: recordSdkOutputFrame },
     )
 
     // Set up data callback

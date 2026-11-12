@@ -1,5 +1,6 @@
 import { URL } from 'url'
 import { isEnvTruthy } from '../../utils/envUtils.js'
+import type { SdkOutputPersistenceOwner } from '../../utils/sdkOutputFrames.js'
 import { HybridTransport } from './HybridTransport.js'
 import { SSETransport } from './SSETransport.js'
 import type { Transport } from './Transport.js'
@@ -18,6 +19,7 @@ export function getTransportForUrl(
   headers: Record<string, string> = {},
   sessionId?: string,
   refreshHeaders?: () => Record<string, string>,
+  sdkOutput?: SdkOutputPersistenceOwner,
 ): Transport {
   if (isEnvTruthy(process.env.CLAUDE_CODE_USE_CCR_V2)) {
     // v2: SSE for reads, HTTP POST for writes
@@ -36,9 +38,9 @@ export function getTransportForUrl(
 
   if (url.protocol === 'ws:' || url.protocol === 'wss:') {
     if (isEnvTruthy(process.env.CLAUDE_CODE_POST_FOR_SESSION_INGRESS_V2)) {
-      return new HybridTransport(url, headers, sessionId, refreshHeaders)
+      return new HybridTransport(url, headers, sessionId, refreshHeaders, { sdkOutput })
     }
-    return new WebSocketTransport(url, headers, sessionId, refreshHeaders)
+    return new WebSocketTransport(url, headers, sessionId, refreshHeaders, { sdkOutput })
   } else {
     throw new Error(`Unsupported protocol: ${url.protocol}`)
   }

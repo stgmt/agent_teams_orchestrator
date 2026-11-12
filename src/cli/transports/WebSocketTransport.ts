@@ -1,7 +1,13 @@
 import type { StdoutMessage } from 'src/entrypoints/sdk/controlTypes.js'
+import type { IncomingMessage } from 'http'
 import type WsWebSocket from 'ws'
+import { randomUUID } from 'crypto'
+import {
+  persistSdkOutputFrame,
+  readSdkOutputFrames,
+  type SdkOutputPersistenceOwner,
+} from '../../utils/sdkOutputFrames.js'
 import { logEvent } from '../../services/analytics/index.js'
-import { CircularBuffer } from '../../utils/CircularBuffer.js'
 import { logForDebugging } from '../../utils/debug.js'
 import { logForDiagnosticsNoPII } from '../../utils/diagLogs.js'
 import { isEnvTruthy } from '../../utils/envUtils.js'
@@ -19,7 +25,6 @@ import type { Transport } from './Transport.js'
 
 const KEEP_ALIVE_FRAME = '{"type":"keep_alive"}\n'
 
-const DEFAULT_MAX_BUFFER_SIZE = 1000
 const DEFAULT_BASE_RECONNECT_DELAY = 1000
 const DEFAULT_MAX_RECONNECT_DELAY = 30000
 /** Time budget for reconnection attempts before giving up (10 minutes). */
@@ -55,6 +60,8 @@ export type WebSocketTransportOptions = {
    *  Cloudflare-idle-timeout population) emit; print-mode workers stay
    *  silent. Defaults to false. */
   isBridge?: boolean
+  /** Explicit canonical session owner; omitted only for launch-policy opt-outs. */
+  sdkOutput?: SdkOutputPersistenceOwner
 }
 
 type WebSocketTransportState =
@@ -102,8 +109,12 @@ export class WebSocketTransport implements Transport {
   // Periodic keep_alive data frames to reset proxy idle timers
   private keepAliveInterval: NodeJS.Timeout | null = null
 
-  // Message buffering for replay on reconnection
-  private messageBuffer: CircularBuffer<StdoutMessage>
+  // Persistent sessions replay the canonical session log, not an evicting cache.
+  // Explicit no-persistence sessions retain output only in their surviving process.
+  private memoryReplay: (StdoutMessage & { uuid: string })[] = []
+  private replayPath: string | undefined
+  private outputQueue: Promise<void> = Promise.resolve()
+  private readonly sdkOutput?: SdkOutputPersistenceOwner
   // Track which runtime's WS we're using so we can detach listeners
   // with the matching API (removeEventListener vs. off).
   private isBunWs = false
@@ -113,6 +124,7 @@ export class WebSocketTransport implements Transport {
   // arrow function (removable in doDisconnect) instead of a closure over
   // a local variable.
   private connectStartTime = 0
+  private serverLastRequestId = ''
 
   private refreshHeaders?: () => Record<string, string>
 
@@ -129,7 +141,7 @@ export class WebSocketTransport implements Transport {
     this.refreshHeaders = refreshHeaders
     this.autoReconnect = options?.autoReconnect ?? true
     this.isBridge = options?.isBridge ?? false
-    this.messageBuffer = new CircularBuffer(DEFAULT_MAX_BUFFER_SIZE)
+    this.sdkOutput = options?.sdkOutput
   }
 
   public async connect(): Promise<void> {
@@ -143,6 +155,7 @@ export class WebSocketTransport implements Transport {
     }
     this.state = 'reconnecting'
 
+    this.serverLastRequestId = ''
     this.connectStartTime = Date.now()
     logForDebugging(`WebSocketTransport: Opening ${this.url.href}`)
     logForDiagnosticsNoPII('info', 'cli_websocket_connect_opening')
@@ -184,6 +197,7 @@ export class WebSocketTransport implements Transport {
       this.ws = ws
       this.isBunWs = false
 
+      ws.on('upgrade', this.onNodeUpgrade)
       ws.on('open', this.onNodeOpen)
       ws.on('message', this.onNodeMessage)
       ws.on('error', this.onNodeError)
@@ -199,12 +213,13 @@ export class WebSocketTransport implements Transport {
   // instability. Mirrors the pattern in src/utils/mcpWebSocketTransport.ts.
 
   private onBunOpen = () => {
+    const socket = this.ws
+    if (!socket) return
+    // Queue replay before notifying callers, so newly emitted output cannot
+    // overtake recovery. Bun has no upgrade-response cursor: replay all.
+    void this.serializeOutput(() => this.replayBufferedMessages('', socket))
+      .catch(error => this.failOutput(error))
     this.handleOpenEvent()
-    // Bun's WebSocket doesn't expose upgrade response headers,
-    // so replay all buffered messages. The server deduplicates by UUID.
-    if (this.lastSentId) {
-      this.replayBufferedMessages('')
-    }
   }
 
   private onBunMessage = (event: MessageEvent) => {
@@ -240,22 +255,18 @@ export class WebSocketTransport implements Transport {
 
   // --- Node (ws package) event handlers ---
 
+  private onNodeUpgrade = (response: IncomingMessage) => {
+    const cursor = response.headers['x-last-request-id']
+    this.serverLastRequestId = typeof cursor === 'string' ? cursor : ''
+  }
+
   private onNodeOpen = () => {
-    // Capture ws before handleOpenEvent() invokes onConnectCallback — if the
-    // callback synchronously closes the transport, this.ws becomes null.
-    // The old inline-closure code had this safety implicitly via closure capture.
-    const ws = this.ws
+    const socket = this.ws
+    if (!socket) return
+    const cursor = this.serverLastRequestId
+    void this.serializeOutput(() => this.replayBufferedMessages(cursor, socket))
+      .catch(error => this.failOutput(error))
     this.handleOpenEvent()
-    if (!ws) return
-    // Check for last-id in upgrade response headers (ws package only)
-    const nws = ws as unknown as WsWebSocket & {
-      upgradeReq?: { headers?: Record<string, string> }
-    }
-    const upgradeResponse = nws.upgradeReq
-    if (upgradeResponse?.headers?.['x-last-request-id']) {
-      const serverLastId = upgradeResponse.headers['x-last-request-id']
-      this.replayBufferedMessages(serverLastId)
-    }
   }
 
   private onNodeMessage = (data: Buffer) => {
@@ -369,6 +380,7 @@ export class WebSocketTransport implements Transport {
       nws.removeEventListener('pong' as 'message', this.onPong)
     } else {
       const nws = ws as unknown as WsWebSocket
+      nws.off('upgrade', this.onNodeUpgrade)
       nws.off('open', this.onNodeOpen)
       nws.off('message', this.onNodeMessage)
       nws.off('error', this.onNodeError)
@@ -571,66 +583,45 @@ export class WebSocketTransport implements Transport {
     this.doDisconnect()
   }
 
-  private replayBufferedMessages(lastId: string): void {
-    const messages = this.messageBuffer.toArray()
-    if (messages.length === 0) return
+  private serializeOutput(operation: () => Promise<void>): Promise<void> {
+    const next = this.outputQueue.then(operation)
+    this.outputQueue = next
+    return next
+  }
 
-    // Find where to start replay based on server's last received message
-    let startIndex = 0
+  private failOutput(error: unknown): void {
+    logForDebugging(`WebSocketTransport: SDK output persistence/replay failed: ${String(error)}`, { level: 'error' })
+    this.state = 'closed'
+    this.doDisconnect()
+    this.onCloseCallback?.()
+  }
+
+  private async *retainedOutput(): AsyncGenerator<StdoutMessage & { uuid: string }> {
+    if (this.replayPath) yield* readSdkOutputFrames(this.replayPath)
+    else yield* this.memoryReplay
+  }
+
+  private async replayBufferedMessages(lastId: string, socket: WebSocketLike): Promise<void> {
+    // A cursor absent from retained output is unknown, not confirmation.
+    // Two streaming passes avoid retaining the entire session in memory.
+    let recognized = false
     if (lastId) {
-      const lastConfirmedIndex = messages.findIndex(
-        message => 'uuid' in message && message.uuid === lastId,
-      )
-      if (lastConfirmedIndex >= 0) {
-        // Server confirmed messages up to lastConfirmedIndex — evict them
-        startIndex = lastConfirmedIndex + 1
-        // Rebuild the buffer with only unconfirmed messages
-        const remaining = messages.slice(startIndex)
-        this.messageBuffer.clear()
-        this.messageBuffer.addAll(remaining)
-        if (remaining.length === 0) {
-          this.lastSentId = null
+      for await (const message of this.retainedOutput()) {
+        if (message.uuid === lastId) {
+          recognized = true
+          break
         }
-        logForDebugging(
-          `WebSocketTransport: Evicted ${startIndex} confirmed messages, ${remaining.length} remaining`,
-        )
-        logForDiagnosticsNoPII(
-          'info',
-          'cli_websocket_evicted_confirmed_messages',
-          {
-            evicted: startIndex,
-            remaining: remaining.length,
-          },
-        )
       }
     }
-
-    const messagesToReplay = messages.slice(startIndex)
-    if (messagesToReplay.length === 0) {
-      logForDebugging('WebSocketTransport: No new messages to replay')
-      logForDiagnosticsNoPII('info', 'cli_websocket_no_messages_to_replay')
-      return
-    }
-
-    logForDebugging(
-      `WebSocketTransport: Replaying ${messagesToReplay.length} buffered messages`,
-    )
-    logForDiagnosticsNoPII('info', 'cli_websocket_messages_to_replay', {
-      count: messagesToReplay.length,
-    })
-
-    for (const message of messagesToReplay) {
-      const line = jsonStringify(message) + '\n'
-      const success = this.sendLine(line)
-      if (!success) {
-        this.handleConnectionError()
-        break
+    let replay = !recognized
+    for await (const message of this.retainedOutput()) {
+      if (this.ws !== socket || this.state !== 'connected') return
+      if (!replay) {
+        if (message.uuid === lastId) replay = true
+        continue
       }
+      if (!this.sendLine(jsonStringify(message) + '\n')) return
     }
-    // Do NOT clear the buffer after replay — messages remain buffered until
-    // the server confirms receipt on the next reconnection. This prevents
-    // message loss if the connection drops after replay but before the server
-    // processes the messages.
   }
 
   isConnectedStatus(): boolean {
@@ -658,26 +649,29 @@ export class WebSocketTransport implements Transport {
   }
 
   async write(message: StdoutMessage): Promise<void> {
-    if ('uuid' in message && typeof message.uuid === 'string') {
-      this.messageBuffer.add(message)
-      this.lastSentId = message.uuid
-    }
-
-    const line = jsonStringify(message) + '\n'
-
-    if (this.state !== 'connected') {
-      // Message buffered for replay when connected (if it has a UUID)
+    // Heartbeats have no side effect or recovery identity. Every other frame
+    // receives an event UUID once; request_id remains control correlation.
+    if (message.type === 'keep_alive' && !('uuid' in message)) {
+      if (this.state === 'connected') this.sendLine(jsonStringify(message) + '\n')
       return
     }
-
-    const sessionLabel = this.sessionId ? ` session=${this.sessionId}` : ''
-    const detailLabel = this.getControlMessageDetailLabel(message)
-
-    logForDebugging(
-      `WebSocketTransport: Sending message type=${message.type}${sessionLabel}${detailLabel}`,
-    )
-
-    this.sendLine(line)
+    const frame = 'uuid' in message && typeof message.uuid === 'string'
+      ? message as StdoutMessage & { uuid: string }
+      : { ...message, uuid: randomUUID() }
+    return this.serializeOutput(async () => {
+      const path = await persistSdkOutputFrame(frame, this.sdkOutput)
+      if (path) this.replayPath = path
+      else this.memoryReplay.push(frame)
+      this.lastSentId = frame.uuid
+      if (this.state !== 'connected') return
+      const sessionLabel = this.sessionId ? ` session=${this.sessionId}` : ''
+      const detailLabel = this.getControlMessageDetailLabel(frame)
+      logForDebugging(`WebSocketTransport: Sending message type=${frame.type}${sessionLabel}${detailLabel}`)
+      this.sendLine(jsonStringify(frame) + '\n')
+    }).catch(error => {
+      this.failOutput(error)
+      throw error
+    })
   }
 
   private getControlMessageDetailLabel(message: StdoutMessage): string {
