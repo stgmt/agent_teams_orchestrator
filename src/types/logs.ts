@@ -1,4 +1,5 @@
 import type { UUID } from 'crypto'
+import type { StdoutMessage } from 'src/entrypoints/sdk/controlTypes.js'
 import type {
   BoardTaskLinkV1,
   BoardTaskToolActionV1,
@@ -300,6 +301,13 @@ export type ContextCollapseSnapshotEntry = {
   lastSpawnTokens: number
 }
 
+/** SDK wire output is not a conversation message and never enters its UUID chain. */
+export type SdkOutputEntry = {
+  type: 'sdk-output'
+  sessionId: UUID
+  message: StdoutMessage & { uuid: string }
+}
+
 export type Entry =
   | TranscriptMessage
   | SummaryMessage
@@ -321,6 +329,7 @@ export type Entry =
   | ContentReplacementEntry
   | ContextCollapseCommitEntry
   | ContextCollapseSnapshotEntry
+  | SdkOutputEntry
 
 export function sortLogs(logs: LogOption[]): LogOption[] {
   return logs.sort((a, b) => {

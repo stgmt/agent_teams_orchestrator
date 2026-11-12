@@ -2,6 +2,9 @@ import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 
 import { buildWorkSyncAdmissionRoot } from './workSyncContinuationAdmission.js'
+import type { QueryGuard } from './QueryGuard.js'
+import { shouldUseCodexProviderRoutingForCurrentProcess } from './auth.js'
+import { getCurrentGroupRunIdentity } from './groupMailbox.js'
 
 export type WorkSyncAdmissionProviderId = 'codex' | 'anthropic'
 
@@ -86,4 +89,29 @@ export async function writeWorkSyncAdmissionCapability(
   state.tail = publication.catch(() => undefined)
   await publication
   return path
+}
+/** Shared assembly for the REPL and SDK owners; readiness comes from installed owners. */
+export async function publishNativeInboxRuntimeCapability(input: {
+  guard: QueryGuard
+  teamName: string
+  memberName: string
+  nativeAttachmentsReady: boolean
+  groupChatReady: boolean
+}) {
+  const providerId = shouldUseCodexProviderRoutingForCurrentProcess() ? 'codex' : 'anthropic'
+  const identity = getCurrentGroupRunIdentity()
+  return writeWorkSyncAdmissionCapability({
+    schemaVersion: 1, recoveryProtocolVersion: 2,
+    teamName: input.teamName,
+    teamIncarnation: process.env.CLAUDE_TEAM_INCARNATION?.trim() || 'unspecified',
+    memberName: input.memberName, providerId,
+    runtimeMode: providerId === 'codex' ? 'app-server' : 'repl',
+    runtimeInstanceId: input.guard.runtimeInstanceId,
+    generation: input.guard.generation, processorReady: true,
+    pid: identity.pid, bootstrapRunId: identity.bootstrapRunId,
+    runtimeRunId: identity.runtimeRunId,
+    ...(input.nativeAttachmentsReady ? { nativeInboxAttachmentsVersion: 2 as const } : {}),
+    ...(input.groupChatReady ? { groupChatProtocolVersion: 1 as const, groupReactionProtocolVersion: 1 as const, groupRunKey: identity.groupRunKey, runKey: identity.runKey } : {}),
+    publishedAt: new Date().toISOString(),
+  })
 }

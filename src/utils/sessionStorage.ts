@@ -1,6 +1,7 @@
 import { feature } from 'bun:bundle'
 import type { UUID } from 'crypto'
 import type { Dirent } from 'fs'
+import type { StdoutMessage } from 'src/entrypoints/sdk/controlTypes.js'
 // Sync fs primitives for readFileTailSync — separate from fs/promises
 // imports above. Named (not wildcard) per CLAUDE.md style; no collisions
 // with the async-suffixed names.
@@ -28,7 +29,6 @@ import {
   getPromptId,
   getSessionId,
   getSessionProjectDir,
-  isSessionPersistenceDisabled,
   switchSession,
 } from '../bootstrap/state.js'
 import { builtInCommandNames } from '../commands.js'
@@ -52,6 +52,7 @@ import {
   type LogOption,
   type PersistedWorktreeSession,
   type SerializedMessage,
+  type SdkOutputEntry,
   sortLogs,
   type TranscriptMessage,
 } from '../types/logs.js'
@@ -92,6 +93,8 @@ import {
   readTranscriptForLoad,
   SKIP_PRECOMPACT_THRESHOLD,
 } from './sessionStoragePortable.js'
+import { isSessionOutputPersistenceDisabledByLaunch } from './sdkOutputFrames.js'
+export { readSdkOutputFrames } from './sdkOutputFrames.js'
 import { getSettings_DEPRECATED } from './settings/settings.js'
 import { jsonParse, jsonStringify } from './slowOperations.js'
 import type { ContentReplacementRecord } from './toolResultStorage.js'
@@ -418,14 +421,9 @@ export function getNodeEnv(): string {
 
 /** The effective host persistence policy, shared by transcript and native history owners. */
 export function isSessionStoragePersistenceEnabled(): boolean {
-  const allowTestPersistence = isEnvTruthy(
-    process.env.TEST_ENABLE_SESSION_PERSISTENCE,
-  )
-  return !(
-    (getNodeEnv() === 'test' && !allowTestPersistence) ||
-    getSettings_DEPRECATED()?.cleanupPeriodDays === 0 ||
-    isSessionPersistenceDisabled() ||
-    isEnvTruthy(process.env.CLAUDE_CODE_SKIP_PROMPT_HISTORY)
+  return (
+    !isSessionOutputPersistenceDisabledByLaunch() &&
+    getSettings_DEPRECATED()?.cleanupPeriodDays !== 0
   )
 }
 
@@ -1136,6 +1134,21 @@ class Project {
     })
   }
 
+  async insertSdkOutput(message: SdkOutputEntry['message']): Promise<string | undefined> {
+    if (this.shouldSkipPersistence()) return undefined
+    await this.materializeSessionFile()
+    const path = this.ensureCurrentSessionFile()
+    await this.appendEntry({
+      type: 'sdk-output',
+      sessionId: getSessionId() as UUID,
+      message,
+    })
+    // Use the canonical queue, but do not wait for its periodic timer per frame.
+    // Persistence completes before the corresponding socket send is admitted.
+    await this.flush()
+    return path
+  }
+
   async appendEntry(entry: Entry, sessionId: UUID = getSessionId() as UUID) {
     if (this.shouldSkipPersistence()) {
       return
@@ -1166,7 +1179,10 @@ class Project {
     }
 
     // Only load current session messages if needed
-    if (entry.type === 'summary') {
+    if (entry.type === 'sdk-output') {
+      // Wire envelopes never enter the visible conversation's messageSet.
+      void this.enqueueWrite(sessionFile, entry)
+    } else if (entry.type === 'summary') {
       // Summaries can always be appended
       void this.enqueueWrite(sessionFile, entry)
     } else if (entry.type === 'custom-title') {
@@ -1594,6 +1610,13 @@ export async function recordContextCollapseSnapshot(snapshot: {
 export async function flushSessionStorage(): Promise<void> {
   await getProject().flush()
 }
+
+export async function recordSdkOutputFrame(
+  message: StdoutMessage & { uuid: string },
+): Promise<string | undefined> {
+  return getProject().insertSdkOutput(message)
+}
+
 
 export async function hydrateRemoteSession(
   sessionId: string,

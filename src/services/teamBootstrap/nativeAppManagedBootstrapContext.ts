@@ -7,6 +7,9 @@ import { logForDebugging } from '../../utils/debug.js'
 import { writeJsonFileAtomic } from '../../utils/atomicWrite.js'
 import { getTeamDir, sanitizeName } from '../../utils/swarm/teamHelpers.js'
 import type { BootstrapProvider } from './teamBootstrapTypes.js'
+import type { AppState } from '../../state/AppState.js'
+import { createUserMessage } from '../../utils/messages.js'
+import { writeTeammateRuntimeEvent } from '../../utils/swarm/teammateRuntimeEvents.js'
 
 export const NATIVE_APP_MANAGED_BOOTSTRAP_CONTEXT_ENV =
   'CLAUDE_CODE_NATIVE_APP_MANAGED_BOOTSTRAP_CONTEXT_PATH'
@@ -235,5 +238,81 @@ export async function loadNativeAppManagedBootstrapContextInjection(
       { level: 'warn' },
     )
     throw error
+  }
+}
+
+export type NativeAppManagedBootstrapTurnInjection = {
+  prefixMessages: AppState['messages']
+  contextHash: string
+  briefingHash: string
+  bootstrapProofToken: string
+  runId: string
+  markContextLoaded: () => Promise<void>
+}
+
+export type GetNativeAppManagedBootstrapContextInjection = () => Promise<
+  NativeAppManagedBootstrapTurnInjection | null
+>
+
+export function buildNativeAppManagedBootstrapProofFields(proof: {
+  bootstrapProofToken: string
+  contextHash: string
+  briefingHash: string
+  runId: string
+}) {
+  return {
+    source: NATIVE_APP_MANAGED_BOOTSTRAP_PROOF_SOURCE,
+    bootstrapProofToken: proof.bootstrapProofToken,
+    contextHash: proof.contextHash,
+    briefingHash: proof.briefingHash,
+    detail: JSON.stringify({
+      source: NATIVE_APP_MANAGED_BOOTSTRAP_PROOF_SOURCE,
+      bootstrapProofToken: proof.bootstrapProofToken,
+      contextHash: proof.contextHash,
+      briefingHash: proof.briefingHash,
+      runId: proof.runId,
+    }),
+  }
+}
+
+/** The same process-owned context handoff is used by REPL and native SDK turns. */
+export function createNativeAppManagedBootstrapContextInjection(): GetNativeAppManagedBootstrapContextInjection {
+  let loadPromise: Promise<NativeAppManagedBootstrapContextInjection | null> | null = null
+  let contextLoadedWritten = false
+  return async () => {
+    const contextPath = process.env[NATIVE_APP_MANAGED_BOOTSTRAP_CONTEXT_ENV]
+    if (!contextPath) return null
+    loadPromise ??= loadNativeAppManagedBootstrapContextInjection(contextPath).catch(async error => {
+      await writeTeammateRuntimeEvent({
+        type: 'failed',
+        detail: `Native app-managed bootstrap context failed to load: ${errorMessage(error)}`,
+      })
+      return null
+    })
+    const injection = await loadPromise
+    if (!injection) return null
+    return {
+      prefixMessages: [createUserMessage({ content: injection.prefixMessagesText, isMeta: true })],
+      contextHash: injection.contextHash,
+      briefingHash: injection.briefingHash,
+      bootstrapProofToken: injection.bootstrapProofToken,
+      runId: injection.runId,
+      markContextLoaded: async () => {
+        if (contextLoadedWritten) return
+        await writeTeammateRuntimeEvent({
+          type: 'bootstrap_context_loaded',
+          teamName: injection.teamName,
+          agentName: injection.memberName,
+          agentId: injection.agentId,
+          runId: injection.runId,
+          source: NATIVE_APP_MANAGED_BOOTSTRAP_CONTEXT_SOURCE,
+          bootstrapProofToken: injection.bootstrapProofToken,
+          contextHash: injection.contextHash,
+          briefingHash: injection.briefingHash,
+          detail: JSON.stringify({ contextHash: injection.contextHash, briefingHash: injection.briefingHash }),
+        })
+        contextLoadedWritten = true
+      },
+    }
   }
 }
